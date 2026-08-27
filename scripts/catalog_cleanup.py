@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or remove one confirmed ghost entry from the Codex local catalog."""
+"""Inspect or remove a user-confirmed ghost batch from the Codex local catalog."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ import datetime as dt
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 
-CONFIRM_TOKEN = "DELETE_ONE_CONFIRMED_GHOST"
+CONFIRM_ONE_TOKEN = "DELETE_ONE_CONFIRMED_GHOST"
+CONFIRM_BATCH_TOKEN = "DELETE_CONFIRMED_GHOST_BATCH"
 REQUIRED_COLUMNS = {
     "thread_id",
     "display_title",
@@ -120,7 +122,7 @@ def find_other_references(
 
 def inspect_database(args: argparse.Namespace) -> None:
     database = resolve_db(args.db)
-    with connect(database, "ro") as connection:
+    with closing(connect(database, "ro")) as connection:
         validate_schema(connection)
         integrity = quick_check(connection)
         total = connection.execute(
@@ -147,79 +149,157 @@ def inspect_database(args: argparse.Namespace) -> None:
     )
 
 
-def backup_database(database: Path, backup_dir: Path) -> Path:
+def display_target(target: dict) -> str:
+    title = target["expected_title"] or "[제목 없음]"
+    return f"{title} ({target['thread_id']})"
+
+
+def validate_targets(raw_targets: object) -> list[dict]:
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise CleanupError("manifest targets must be a non-empty list")
+
+    targets: list[dict] = []
+    seen_ids: set[str] = set()
+    for index, raw_target in enumerate(raw_targets, start=1):
+        if not isinstance(raw_target, dict):
+            raise CleanupError(f"manifest target {index} must be an object")
+
+        thread_id = raw_target.get("thread_id")
+        expected_title = raw_target.get("expected_title")
+        expected_source_kind = raw_target.get("expected_source_kind", "chatgpt")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise CleanupError(f"manifest target {index} has an invalid thread_id")
+        if not isinstance(expected_title, str):
+            raise CleanupError(f"manifest target {index} has an invalid expected_title")
+        if not isinstance(expected_source_kind, str) or not expected_source_kind:
+            raise CleanupError(
+                f"manifest target {index} has an invalid expected_source_kind"
+            )
+        if thread_id in seen_ids:
+            raise CleanupError(f"duplicate thread_id in manifest: {thread_id}")
+        seen_ids.add(thread_id)
+        targets.append(
+            {
+                "thread_id": thread_id,
+                "expected_title": expected_title,
+                "expected_source_kind": expected_source_kind,
+            }
+        )
+    return targets
+
+
+def load_batch_manifest(raw_path: str) -> tuple[Path, list[dict]]:
+    manifest = Path(raw_path).expanduser().resolve()
+    if not manifest.is_file():
+        raise CleanupError(f"batch manifest not found: {manifest}")
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise CleanupError(f"invalid batch manifest: {error}") from error
+    if not isinstance(payload, dict):
+        raise CleanupError("batch manifest root must be an object")
+    return manifest, validate_targets(payload.get("targets"))
+
+
+def preflight_targets(
+    connection: sqlite3.Connection, targets: list[dict]
+) -> list[dict]:
+    validated: list[dict] = []
+    for target in targets:
+        rows = catalog_rows(connection, target["thread_id"])
+        if len(rows) != 1:
+            raise CleanupError(
+                f"target row count must be 1 for {display_target(target)}, found {len(rows)}"
+            )
+        row = rows[0]
+        if row["display_title"] != target["expected_title"]:
+            raise CleanupError(f"target title does not match: {display_target(target)}")
+        if row["source_kind"] != target["expected_source_kind"]:
+            raise CleanupError(
+                f"target source kind does not match: {display_target(target)}"
+            )
+        references = find_other_references(connection, target["thread_id"])
+        if references:
+            raise CleanupError(
+                f"target is referenced by other tables: {display_target(target)} {references}"
+            )
+        validated.append(row)
+    return validated
+
+
+def backup_database(database: Path, backup_dir: Path, *, batch: bool) -> Path:
     backup_dir = backup_dir.expanduser().resolve()
     if backup_dir == database.parent.resolve():
         raise CleanupError("backup directory must not be the live database directory")
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    backup = backup_dir / f"codex-dev-pre-ghost-cleanup-{stamp}.sqlite"
+    label = "ghost-cleanup-batch" if batch else "ghost-cleanup"
+    backup = backup_dir / f"codex-dev-pre-{label}-{stamp}.sqlite"
     source = connect(database, "ro")
     destination = sqlite3.connect(backup)
     try:
         source.backup(destination)
+        quick_check(destination)
     finally:
         destination.close()
         source.close()
     return backup
 
 
-def delete_entry(args: argparse.Namespace) -> None:
-    if args.confirm != CONFIRM_TOKEN:
-        raise CleanupError("explicit deletion confirmation token is required")
-
-    database = resolve_db(args.db)
-    expected_title = args.expected_title
-    expected_source_kind = args.expected_source_kind
-
-    with connect(database, "ro") as connection:
+def delete_targets(
+    *, database: Path, targets: list[dict], backup_dir: Path, batch: bool
+) -> dict:
+    with closing(connect(database, "ro")) as connection:
         validate_schema(connection)
         quick_check(connection)
-        rows = catalog_rows(connection, args.thread_id)
-        if len(rows) != 1:
-            raise CleanupError(f"target row count must be 1, found {len(rows)}")
-        target = rows[0]
-        if target["display_title"] != expected_title:
-            raise CleanupError("target title does not match exactly")
-        if target["source_kind"] != expected_source_kind:
-            raise CleanupError("target source kind does not match exactly")
-        references = find_other_references(connection, args.thread_id)
-        if references:
-            raise CleanupError(f"target is referenced by other tables: {references}")
+        preflight_targets(connection, targets)
 
-    backup = backup_database(database, Path(args.backup_dir))
+    backup = backup_database(database, backup_dir, batch=batch)
 
     connection = connect(database, "rw")
     try:
         connection.execute("PRAGMA foreign_keys=ON")
+        validate_schema(connection)
+        quick_check(connection)
         connection.execute("BEGIN IMMEDIATE")
+        preflight_targets(connection, targets)
         before = connection.execute(
             "SELECT COUNT(*) FROM local_thread_catalog"
         ).fetchone()[0]
-        row = connection.execute(
-            """
-            SELECT display_title, source_kind
-            FROM local_thread_catalog
-            WHERE thread_id = ?
-            """,
-            (args.thread_id,),
-        ).fetchall()
-        if len(row) != 1:
-            raise CleanupError("target changed before deletion")
-        if row[0]["display_title"] != expected_title:
-            raise CleanupError("target title changed before deletion")
-        if row[0]["source_kind"] != expected_source_kind:
-            raise CleanupError("target source kind changed before deletion")
 
-        cursor = connection.execute(
-            """
-            DELETE FROM local_thread_catalog
-            WHERE thread_id = ? AND display_title = ? AND source_kind = ?
-            """,
-            (args.thread_id, expected_title, expected_source_kind),
+        deleted = 0
+        for target in targets:
+            cursor = connection.execute(
+                """
+                DELETE FROM local_thread_catalog
+                WHERE thread_id = ? AND display_title = ? AND source_kind = ?
+                """,
+                (
+                    target["thread_id"],
+                    target["expected_title"],
+                    target["expected_source_kind"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise CleanupError(
+                    f"delete count must be 1 for {display_target(target)}, found {cursor.rowcount}"
+                )
+            deleted += cursor.rowcount
+
+        if deleted != len(targets):
+            raise CleanupError(
+                f"batch delete count must be {len(targets)}, found {deleted}"
+            )
+
+        remaining = sum(
+            connection.execute(
+                "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id = ?",
+                (target["thread_id"],),
+            ).fetchone()[0]
+            for target in targets
         )
-        if cursor.rowcount != 1:
-            raise CleanupError(f"delete count must be 1, found {cursor.rowcount}")
+        if remaining != 0:
+            raise CleanupError(f"confirmed targets remaining before commit: {remaining}")
 
         metadata_exists = connection.execute(
             """
@@ -235,12 +315,9 @@ def delete_entry(args: argparse.Namespace) -> None:
                 WHERE id = 1
                 """
             )
-        connection.commit()
 
-        remaining = connection.execute(
-            "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id = ?",
-            (args.thread_id,),
-        ).fetchone()[0]
+        quick_check(connection)
+        connection.commit()
         after = connection.execute(
             "SELECT COUNT(*) FROM local_thread_catalog"
         ).fetchone()[0]
@@ -252,23 +329,59 @@ def delete_entry(args: argparse.Namespace) -> None:
     finally:
         connection.close()
 
-    emit(
-        {
-            "backup": str(backup),
-            "catalog_after": after,
-            "catalog_before": before,
-            "deleted": 1,
-            "integrity": integrity,
-            "target_remaining": remaining,
-            "thread_id": args.thread_id,
-            "title": expected_title,
-        }
+    return {
+        "backup": str(backup),
+        "catalog_after": after,
+        "catalog_before": before,
+        "deleted": deleted,
+        "integrity": integrity,
+        "target_remaining": remaining,
+        "targets": [
+            {
+                "display": display_target(target),
+                "source_kind": target["expected_source_kind"],
+                "thread_id": target["thread_id"],
+                "title": target["expected_title"],
+            }
+            for target in targets
+        ],
+    }
+
+
+def delete_entry(args: argparse.Namespace) -> None:
+    if args.confirm != CONFIRM_ONE_TOKEN:
+        raise CleanupError("explicit single-deletion confirmation token is required")
+    target = {
+        "thread_id": args.thread_id,
+        "expected_title": args.expected_title,
+        "expected_source_kind": args.expected_source_kind,
+    }
+    result = delete_targets(
+        database=resolve_db(args.db),
+        targets=validate_targets([target]),
+        backup_dir=Path(args.backup_dir),
+        batch=False,
     )
+    emit(result)
+
+
+def delete_batch(args: argparse.Namespace) -> None:
+    if args.confirm != CONFIRM_BATCH_TOKEN:
+        raise CleanupError("explicit batch-deletion confirmation token is required")
+    manifest, targets = load_batch_manifest(args.manifest)
+    result = delete_targets(
+        database=resolve_db(args.db),
+        targets=targets,
+        backup_dir=Path(args.backup_dir),
+        batch=True,
+    )
+    result["manifest"] = str(manifest)
+    emit(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Inspect or remove one confirmed Codex ghost-chat catalog entry."
+        description="Inspect or remove user-confirmed Codex ghost-chat catalog entries."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -287,6 +400,16 @@ def build_parser() -> argparse.ArgumentParser:
     delete_parser.add_argument("--backup-dir", required=True)
     delete_parser.add_argument("--confirm", required=True)
     delete_parser.set_defaults(handler=delete_entry)
+
+    batch_parser = subparsers.add_parser(
+        "delete-batch",
+        help="Back up the database and atomically delete a confirmed manifest",
+    )
+    batch_parser.add_argument("--db", help="Absolute live Codex database path")
+    batch_parser.add_argument("--manifest", required=True)
+    batch_parser.add_argument("--backup-dir", required=True)
+    batch_parser.add_argument("--confirm", required=True)
+    batch_parser.set_defaults(handler=delete_batch)
     return parser
 
 

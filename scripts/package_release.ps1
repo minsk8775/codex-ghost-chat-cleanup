@@ -23,6 +23,7 @@ $runtimeFiles = @(
     "SKILL.md",
     "agents\openai.yaml",
     "scripts\catalog_cleanup.py",
+    "references\recovery.md",
     "install.ps1",
     "README.md",
     "LICENSE",

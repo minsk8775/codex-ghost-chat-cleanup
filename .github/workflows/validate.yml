@@ -23,6 +23,9 @@ jobs:
       - name: Check cleanup command interface
         run: python -B scripts/catalog_cleanup.py --help
 
+      - name: Run SQLite batch-deletion tests
+        run: python -m unittest discover -s tests -v
+
       - name: Check public repository contents
         shell: pwsh
         run: |
@@ -30,6 +33,8 @@ jobs:
             "SKILL.md",
             "agents/openai.yaml",
             "scripts/catalog_cleanup.py",
+            "references/recovery.md",
+            "tests/test_catalog_cleanup.py",
             "README.md",
             "LICENSE"
           )

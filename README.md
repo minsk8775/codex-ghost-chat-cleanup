@@ -1,6 +1,6 @@
 # Codex Ghost Chat Cleanup
 
-A safety-focused Codex skill for identifying and removing one confirmed stale local task-catalog entry that still appears in the sidebar but can no longer be opened.
+A safety-focused Codex skill for identifying stale local task-catalog entries, presenting them as `title (ID)`, and atomically deleting the user-confirmed batch.
 
 > **Unofficial community project.** This repository is not affiliated with or endorsed by OpenAI. It works with a local Codex database schema that may change between Codex versions.
 
@@ -8,9 +8,9 @@ A safety-focused Codex skill for identifying and removing one confirmed stale lo
 
 - Inspects the local task catalog without modifying it.
 - Requires a task to be absent from current tasks, archived tasks, and direct lookup before treating it as a confirmed ghost.
-- Deletes only one exact thread ID and title match.
-- Creates a fresh SQLite recovery backup before any deletion.
-- Uses a transaction, updates the catalog revision when supported, and runs an integrity check.
+- Presents every confirmed candidate as `title (thread_id)` and requires a follow-up confirmation of all or selected numbered items.
+- Creates one full SQLite recovery backup before changing the confirmed batch.
+- Deletes the entire confirmed set in one transaction, updates the catalog revision when supported, and runs an integrity check.
 - Stops on schema mismatch, ambiguity, references from other tables, or failed validation.
 
 It does **not** delete normal accessible conversations or replace supported server-side conversation deletion.
@@ -69,20 +69,39 @@ Read-only diagnosis:
 $codex-ghost-chat-cleanup inspect my Codex task list for a ghost chat without deleting anything.
 ```
 
-Deletion remains gated by the authorization rules in `SKILL.md`: the current user message must explicitly request removal, and the candidate must be confirmed and unambiguous.
+The skill first diagnoses candidates and displays a numbered review list such as:
+
+```text
+1. Project cleanup (01abc...)
+2. [제목 없음] (01def...)
+```
+
+The user must then confirm `전체 삭제` or select exact numbered items in a follow-up message. Only that frozen selection is written to the batch manifest and deleted. If any target fails validation, the entire batch is aborted without partial deletion.
+
+## Backup and recovery
+
+Every successful batch deletion first creates one complete SQLite snapshot named like:
+
+```text
+codex-dev-pre-ghost-cleanup-batch-YYYYMMDD-HHMMSS-microseconds.sqlite
+```
+
+The backup is stored in the writable `outputs` directory selected for that run, and the skill reports its absolute path. It contains the catalog state from immediately before the batch deletion.
+
+To restore, fully exit Codex, preserve a separate copy of the current live database, validate the selected backup, and copy the backup over `%USERPROFILE%\.codex\sqlite\codex-dev.db`. Detailed safeguards and PowerShell steps are in [`references/recovery.md`](references/recovery.md). Never restore while Codex is running.
 
 ## Releases
 
 Pushing a tag whose name starts with `v` packages the runtime files and publishes a GitHub Release automatically. For example:
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 ## Development checks
 
-The validation workflow checks required files, rejects database and secret-file patterns, verifies the Python command interface, and exercises release packaging on every push and pull request.
+The validation workflow checks required files, rejects database and secret-file patterns, runs atomic batch-deletion tests against temporary SQLite fixtures, verifies the command interface, and exercises release packaging on every push and pull request.
 
 ## License
 
@@ -92,4 +111,4 @@ MIT. See `LICENSE`.
 
 ## 한국어 요약
 
-열리지 않지만 Codex 목록에 남아 있는 로컬 유령 채팅 항목을 확인하고, 확정된 항목 하나만 백업 후 정리하는 비공식 커뮤니티 스킬입니다. 저장소에는 실제 채팅, 데이터베이스, 백업, 인증 정보 또는 사용자별 절대 경로가 포함되어 있지 않습니다. 설치·업데이트 후에는 Codex를 다시 시작하세요.
+열리지 않지만 Codex 목록에 남아 있는 로컬 유령 채팅 후보를 `제목 (ID)` 형식으로 보여주고, 사용자가 확인한 항목들을 한 번의 백업과 트랜잭션으로 일괄 정리하는 비공식 커뮤니티 스킬입니다. 실제 채팅, 데이터베이스, 백업, 인증 정보 또는 사용자별 절대 경로는 저장소에 포함되지 않습니다. 백업 위치와 복구 절차는 `references/recovery.md`에 설명되어 있습니다.
