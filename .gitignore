@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+
+# Local Codex databases and recovery backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+codex-dev-pre-ghost-cleanup-*
+
+# Secrets and local configuration
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and generated output
+*.log
+dist/
+outputs/
+work/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

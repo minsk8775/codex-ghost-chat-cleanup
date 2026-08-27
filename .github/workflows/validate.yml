@@ -1,0 +1,53 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Check cleanup command interface
+        run: python -B scripts/catalog_cleanup.py --help
+
+      - name: Check public repository contents
+        shell: pwsh
+        run: |
+          $required = @(
+            "SKILL.md",
+            "agents/openai.yaml",
+            "scripts/catalog_cleanup.py",
+            "README.md",
+            "LICENSE"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required file is missing: $path"
+            }
+          }
+
+          $forbidden = Get-ChildItem -File -Recurse | Where-Object {
+            $_.Name -match "\.(db|sqlite|sqlite3)(-.+)?$" -or
+            $_.Name -match "^\.env($|\.)" -or
+            $_.Name -match "codex-dev-pre-ghost-cleanup"
+          }
+          if ($forbidden) {
+            throw "Forbidden private or database file found: $($forbidden.FullName -join ', ')"
+          }
+
+      - name: Exercise release packaging
+        shell: pwsh
+        run: ./scripts/package_release.ps1 -Version "ci" -OutputDirectory "dist"
