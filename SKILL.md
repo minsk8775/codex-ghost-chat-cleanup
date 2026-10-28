@@ -50,6 +50,7 @@ Compare the complete available task sources, present confirmed ghost candidates 
 5. Re-run `inspect` for every confirmed thread ID and confirm that all row counts are zero. Recheck direct task lookup to ensure synchronization did not recreate an item.
 6. Report every deleted item as `title (ID)`, the deleted count, before/after catalog totals, integrity result, and the absolute recovery-backup path.
 7. Explain that the backup is a complete pre-deletion database snapshot. When the user asks where backups are stored, how to restore one, or reports a mistaken deletion, read [references/recovery.md](references/recovery.md) and follow it.
+8. Exit code `2` with `transaction_status: committed` means deletion committed but a post-check failed. Preserve the reported backup and receipt; do not replay deletion. Report the failure and use read-only inspection to establish the current state.
 
 ## Stop Conditions
 
@@ -58,4 +59,6 @@ Compare the complete available task sources, present confirmed ghost candidates 
 - Do not remove an entry that is readable, active, archived, referenced by another local table, outside the confirmed manifest, or not an exact title/ID/source-kind match.
 - If any one target fails validation or changes before deletion, abort the entire batch. Do not partially delete the remaining targets.
 - If the schema check, unique-ID invariant, backup, transaction, target-count check, or integrity check fails, stop and report the error. Preserve any created backup.
+- Never automatically prune SQLite recovery backups, user backups, or old skill installations. Follow the explicit selection and verification procedure in [references/recovery.md](references/recovery.md).
 - This cleanup removes a stale local catalog row; it is not a substitute for supported deletion of a real server-side conversation.
+

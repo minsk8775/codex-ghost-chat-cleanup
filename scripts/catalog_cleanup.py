@@ -20,11 +20,26 @@ REQUIRED_COLUMNS = {
     "source_kind",
     "host_id",
     "missing_candidate",
+    "source_created_at",
+    "source_updated_at",
+    "source_recency_at",
 }
 
 
 class CleanupError(RuntimeError):
     pass
+
+
+class CommittedCleanupError(CleanupError):
+    def __init__(self, error: Exception, *, backup: Path, deleted: int) -> None:
+        super().__init__(f"deletion committed; post-check failed: {error}")
+        self.result = {
+            "backup": str(backup),
+            "deleted": deleted,
+            "transaction_status": "committed",
+            "postcheck": "failed",
+            "retry_safe": False,
+        }
 
 
 def emit(payload: dict, *, stream=sys.stdout) -> None:
@@ -59,12 +74,39 @@ def validate_schema(connection: sqlite3.Connection) -> None:
     ).fetchone()
     if table is None:
         raise CleanupError("local_thread_catalog table is missing")
-    columns = {
-        row[1] for row in connection.execute("PRAGMA table_info(local_thread_catalog)")
-    }
+    info = list(connection.execute("PRAGMA table_info(local_thread_catalog)"))
+    columns = {row[1] for row in info}
     missing = sorted(REQUIRED_COLUMNS - columns)
     if missing:
         raise CleanupError(f"unsupported catalog schema; missing columns: {missing}")
+    if [row[1] for row in info if row[5]] != ["thread_id"]:
+        raise CleanupError("unsupported catalog schema; thread_id must be the primary key")
+    for row in info:
+        if row[1] in {"thread_id", "display_title", "source_kind"} and not any(
+            text_type in row[2].upper() for text_type in ("CHAR", "CLOB", "TEXT")
+        ):
+            raise CleanupError(f"unsupported catalog column type: {row[1]}")
+        if row[1] == "missing_candidate" and "INT" not in row[2].upper():
+            raise CleanupError("unsupported catalog column type: missing_candidate")
+    metadata = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_thread_catalog_metadata'"
+    ).fetchone()
+    if metadata:
+        metadata_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(local_thread_catalog_metadata)")
+        }
+        if not {"id", "catalog_revision"} <= metadata_columns:
+            raise CleanupError("unsupported catalog metadata schema")
+        revisions = connection.execute(
+            "SELECT catalog_revision FROM local_thread_catalog_metadata WHERE id = 1"
+        ).fetchall()
+        if len(revisions) != 1 or type(revisions[0][0]) is not int:
+            raise CleanupError("unsupported catalog metadata revision")
+    if connection.execute(
+        """SELECT 1 FROM sqlite_master WHERE type='trigger'
+           AND tbl_name IN ('local_thread_catalog', 'local_thread_catalog_metadata')"""
+    ).fetchone():
+        raise CleanupError("unsupported catalog schema; triggers require compatibility review")
 
 
 def quick_check(connection: sqlite3.Connection) -> str:
@@ -257,6 +299,7 @@ def delete_targets(
     backup = backup_database(database, backup_dir, batch=batch)
 
     connection = connect(database, "rw")
+    committed = False
     try:
         connection.execute("PRAGMA foreign_keys=ON")
         validate_schema(connection)
@@ -318,11 +361,14 @@ def delete_targets(
 
         quick_check(connection)
         connection.commit()
+        committed = True
         after = connection.execute(
             "SELECT COUNT(*) FROM local_thread_catalog"
         ).fetchone()[0]
         integrity = quick_check(connection)
-    except Exception:
+    except Exception as error:
+        if committed:
+            raise CommittedCleanupError(error, backup=backup, deleted=deleted) from error
         if connection.in_transaction:
             connection.rollback()
         raise
@@ -331,6 +377,9 @@ def delete_targets(
 
     return {
         "backup": str(backup),
+        "transaction_status": "committed",
+        "postcheck": "passed",
+        "retry_safe": False,
         "catalog_after": after,
         "catalog_before": before,
         "deleted": deleted,
@@ -419,6 +468,9 @@ def main() -> int:
     try:
         args.handler(args)
         return 0
+    except CommittedCleanupError as error:
+        emit({**error.result, "error": str(error), "type": type(error).__name__}, stream=sys.stderr)
+        return 2
     except (CleanupError, sqlite3.Error, OSError) as error:
         emit({"error": str(error), "type": type(error).__name__}, stream=sys.stderr)
         return 1
@@ -426,3 +478,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
