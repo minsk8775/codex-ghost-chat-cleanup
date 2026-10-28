@@ -82,8 +82,10 @@ def validate_schema(connection: sqlite3.Connection) -> None:
     if [row[1] for row in info if row[5]] != ["thread_id"]:
         raise CleanupError("unsupported catalog schema; thread_id must be the primary key")
     for row in info:
-        if row[1] in {"thread_id", "display_title", "source_kind"} and not any(
-            text_type in row[2].upper() for text_type in ("CHAR", "CLOB", "TEXT")
+        if row[1] in {"thread_id", "display_title", "source_kind"} and (
+            "INT" in row[2].upper() or not any(
+                text_type in row[2].upper() for text_type in ("CHAR", "CLOB", "TEXT")
+            )
         ):
             raise CleanupError(f"unsupported catalog column type: {row[1]}")
         if row[1] == "missing_candidate" and "INT" not in row[2].upper():
@@ -302,9 +304,9 @@ def delete_targets(
     committed = False
     try:
         connection.execute("PRAGMA foreign_keys=ON")
-        validate_schema(connection)
         quick_check(connection)
         connection.execute("BEGIN IMMEDIATE")
+        validate_schema(connection)
         preflight_targets(connection, targets)
         before = connection.execute(
             "SELECT COUNT(*) FROM local_thread_catalog"

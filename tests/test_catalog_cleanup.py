@@ -262,15 +262,31 @@ class CatalogCleanupTests(unittest.TestCase):
                 cleanup.validate_schema(connection)
 
     def test_changed_identifier_type_is_rejected(self) -> None:
-        with closing(sqlite3.connect(":memory:")) as connection:
-            connection.execute(
-                "CREATE TABLE local_thread_catalog (" + ", ".join(
-                    f'{name} ' + ("INTEGER PRIMARY KEY" if name == "thread_id" else "TEXT")
-                    for name in sorted(cleanup.REQUIRED_COLUMNS)
-                ) + ")"
+        for identifier_type in ("INTEGER", "INTTEXT"):
+            with self.subTest(identifier_type=identifier_type):
+                with closing(sqlite3.connect(":memory:")) as connection:
+                    connection.execute(
+                        "CREATE TABLE local_thread_catalog (" + ", ".join(
+                            f'{name} ' + (f"{identifier_type} PRIMARY KEY" if name == "thread_id" else "TEXT")
+                            for name in sorted(cleanup.REQUIRED_COLUMNS)
+                        ) + ")"
+                    )
+                    with self.assertRaisesRegex(cleanup.CleanupError, "column type"):
+                        cleanup.validate_schema(connection)
+
+    def test_schema_is_revalidated_under_write_lock(self) -> None:
+        real_validate = cleanup.validate_schema
+        transaction_states = []
+
+        def validate(connection):
+            transaction_states.append(connection.in_transaction)
+            real_validate(connection)
+
+        with patch.object(cleanup, "validate_schema", side_effect=validate):
+            cleanup.delete_targets(
+                database=self.database, targets=self._targets(), backup_dir=self.backups, batch=True
             )
-            with self.assertRaisesRegex(cleanup.CleanupError, "column type"):
-                cleanup.validate_schema(connection)
+        self.assertEqual(transaction_states, [False, True])
 
     def _fail_quick_check(self, on_call: int):
         real_check = cleanup.quick_check
