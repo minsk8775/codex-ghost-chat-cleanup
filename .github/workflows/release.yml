@@ -13,14 +13,34 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+
+      - name: Validate tag and run fixture tests
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -ne "v$((Get-Content VERSION -Raw).Trim())") {
+            throw "Release tag must match VERSION"
+          }
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Fixture tests failed" }
 
       - name: Package runtime files
         shell: pwsh
-        run: ./scripts/package_release.ps1 -Version "${{ github.ref_name }}" -OutputDirectory "dist"
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/package_release.ps1 -Version $env:RELEASE_TAG -OutputDirectory "dist"
 
       - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/*.zip dist/SHA256SUMS.txt --generate-notes --verify-tag
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create $env:RELEASE_TAG dist/*.zip dist/SHA256SUMS.txt --generate-notes --verify-tag
+

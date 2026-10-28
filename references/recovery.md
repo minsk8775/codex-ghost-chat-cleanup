@@ -54,3 +54,14 @@ Keep the `*.pre-restore-*` safety copy until Codex starts normally and the resto
 - Do not delete the pre-restore safety copy during the recovery session.
 - Stop if either database fails `PRAGMA quick_check`, the schema is unsupported, the expected entries are absent from the backup, or the live path is ambiguous.
 - Recovery replaces the complete local database state. It is not a row-level undo and does not restore server-side conversations.
+
+## A Committed Deletion with a Failed Post-check
+
+Exit code `2` reports `transaction_status: committed`, `postcheck: failed`, `retry_safe: false`, the deleted count, and the exact recovery-backup path. The transaction has already committed; rollback is no longer possible. Preserve this receipt and the backup. Do not replay the deletion command. Inspect only the originally confirmed IDs to determine the current catalog state before considering recovery.
+
+## Old Installation Backups
+
+`install.ps1 -Replace` preserves the previous skill directory as `codex-ghost-chat-cleanup.backup-<timestamp>`. Neither installation nor cleanup deletes these directories or any SQLite recovery backup automatically.
+
+After verifying the replacement installation, a user may explicitly select one exact old installation-backup path for removal. First resolve its absolute path and verify that it is a sibling of the installed skill, has the exact timestamped installation-backup name, contains the expected `SKILL.md`, `agents/openai.yaml`, `scripts/catalog_cleanup.py`, and `references/recovery.md`, and contains no database, recovery snapshot, symlink, or additional user file. A name alone does not prove ownership. If provenance or contents are uncertain, keep it. Do not apply wildcard, age-based, recursive parent-folder, or bulk deletion. User-created backups, recovery snapshots, and pre-restore safety copies remain preserved until the user separately chooses their exact paths.
+

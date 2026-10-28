@@ -12,6 +12,7 @@ A safety-focused Codex skill for identifying stale local task-catalog entries, p
 - Creates one full SQLite recovery backup before changing the confirmed batch.
 - Deletes the entire confirmed set in one transaction, updates the catalog revision when supported, and runs an integrity check.
 - Stops on schema mismatch, ambiguity, references from other tables, or failed validation.
+- Reports committed deletion with failed post-check separately (exit code `2`); never replay that deletion.
 
 It does **not** delete normal accessible conversations or replace supported server-side conversation deletion.
 
@@ -61,6 +62,8 @@ git -C "$env:USERPROFILE\.codex\skills\codex-ghost-chat-cleanup" pull --ff-only
 
 Restart Codex after updating. Release ZIP installations can be updated by downloading the latest release and running `install.ps1 -Replace`.
 
+Installation backups and SQLite recovery snapshots are never automatically deleted. Review and select an exact old installation backup only after verifying the new installation; see the safeguards in [`references/recovery.md`](references/recovery.md).
+
 ## Use
 
 Read-only diagnosis:
@@ -95,13 +98,15 @@ To restore, fully exit Codex, preserve a separate copy of the current live datab
 Pushing a tag whose name starts with `v` packages the runtime files and publishes a GitHub Release automatically. For example:
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.1.1
+git push origin v1.1.1
 ```
 
 ## Development checks
 
 The validation workflow checks required files, rejects database and secret-file patterns, runs atomic batch-deletion tests against temporary SQLite fixtures, verifies the command interface, and exercises release packaging on every push and pull request.
+
+Schema checks cover every queried catalog column, the single `thread_id` primary key, optional metadata revision support, and unexpected catalog triggers. Additive columns are accepted. These fixture checks do not establish compatibility with every Codex release; an unknown schema stops before backup or mutation. Release tags must match `VERSION`, and fixture tests run again before publication.
 
 ## License
 
@@ -112,3 +117,4 @@ MIT. See `LICENSE`.
 ## 한국어 요약
 
 열리지 않지만 Codex 목록에 남아 있는 로컬 유령 채팅 후보를 `제목 (ID)` 형식으로 보여주고, 사용자가 확인한 항목들을 한 번의 백업과 트랜잭션으로 일괄 정리하는 비공식 커뮤니티 스킬입니다. 실제 채팅, 데이터베이스, 백업, 인증 정보 또는 사용자별 절대 경로는 저장소에 포함되지 않습니다. 백업 위치와 복구 절차는 `references/recovery.md`에 설명되어 있습니다.
+
